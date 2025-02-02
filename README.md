@@ -15,7 +15,7 @@ pip install -r requirements.txt
 
 Choose a sim to run, for example, diloco-sim:
 ```bash
-cd sims/diloco-sim
+cd sims/diloco_sim
 ```
 
 Then get started with one of the examples available in the examples folder. Here is an example of the minimal arguments needed to train a CNN with diloco-sim:
