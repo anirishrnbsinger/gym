@@ -11,4 +11,3 @@ Pillow
 wandb
 transformers
 datasets
-wandb

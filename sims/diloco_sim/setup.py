@@ -1,7 +1,7 @@
 import torch
 import os
 from typing import Optional, Iterator, Tuple
-from torch.distributed import init_process_group as init_process_group, destroy_process_group
+from torch.distributed import init_process_group, destroy_process_group
 import torch.distributed as dist
 from copy import deepcopy
 from torch.utils.data import DataLoader, DistributedSampler
@@ -51,20 +51,26 @@ class DilocoSetup:
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = "12355"
         self.rank = rank
+
+        # For this simulation, we assign:
+        # - Rank 0 to the GPU (MPS) if available,
+        # - All other ranks will use the CPU.
+        if rank == 0 and torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+            backend = "gloo"  # Use gloo as NCCL is not supported on MPS.
+        else:
+            self.device = torch.device("cpu")
+            backend = "gloo"
+
         init_process_group(
-            backend=(
-                "nccl" if torch.cuda.is_available() and self.config.num_nodes == torch.cuda.device_count() else "gloo"
-            ),
-            # init_method="env://",
+            backend=backend,
             rank=rank,
             world_size=self.config.num_nodes,
         )
-        self.device = torch.device(f"cuda:{rank % torch.cuda.device_count()}" if torch.cuda.is_available() else "cpu")
-        torch.cuda.set_device(self.device) if self.device.type == "cuda" else None
         print(f"Initialized process group with rank {rank} on device {self.device}")
 
     def _cleanup(self):
-        if self.rank == 0:
+        if self.rank == 0 and self.config.wandb_project:
             wandb.finish()
         if self.pbar:
             self.pbar.close()
@@ -87,9 +93,14 @@ class DilocoSetup:
         if self.rank == 0:
             print("Setting up model")
         self.model = self.config.model_cls(**self.config.model_kwargs).to(self.device)
-        for name, param in self.model.named_parameters():
-            dist.broadcast(param.data, src=0)
-
+        
+        if dist.get_world_size() > 1:
+            for name, param in self.model.named_parameters():
+                # Convert parameter data to CPU so that broadcast works across devices,
+                # then copy the broadcasted CPU tensor back to the process's device.
+                tensor_cpu = param.data.cpu()
+                dist.broadcast(tensor_cpu, src=0)
+                param.data.copy_(tensor_cpu.to(self.device))
         self.model.train()
 
     def _setup_optimizer(self):
@@ -120,7 +131,7 @@ class DilocoSetup:
             print("Setting up train dataloader")
         sampler = DistributedSampler(
             self.config.train_dataset, num_replicas=self.config.num_nodes, rank=self.rank, shuffle=True, drop_last=True
-        )  # May want to do different data split between workers when looping over epochs
+        )
         self.train_dataloader = DataLoader(
             self.config.train_dataset, batch_size=self.config.batch_size, sampler=sampler, pin_memory=True
         )
@@ -153,7 +164,6 @@ class DilocoSetup:
                 x, y = next(self.eval_data_iter)
 
         x, y = x.to(self.device), y.to(self.device)
-
         return x, y
 
     def _setup(self, rank: int):

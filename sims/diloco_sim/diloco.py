@@ -4,7 +4,7 @@ from tqdm import tqdm
 from .config import DilocoSimulatorConfig
 from .setup import DilocoSetup
 from .eval import Evaluator
-from .sparta import SpartaInterpolator
+#from .sparta import SpartaInterpolator
 from dataclasses import dataclass
 import wandb
 
@@ -15,15 +15,22 @@ class TrainStats:
     perplexity: float
 
 
-class DilocoSimulator(Evaluator, SpartaInterpolator):
+class DilocoSimulator(Evaluator):
 
     def __init__(self, config: DilocoSimulatorConfig) -> None:
         super().__init__(config)
 
     def _average_models(self) -> None:
+        # This averages parameters across the nodes.
+        # For MPS, perform all_reduce on a CPU copy of the parameters.
         for param in self.model.parameters():
-            dist.all_reduce(param.data, op=dist.ReduceOp.SUM)
-            param.data /= self.config.num_nodes
+            if self.device.type == "mps":
+                tensor_cpu = param.data.cpu()
+                dist.all_reduce(tensor_cpu, op=dist.ReduceOp.SUM)
+                param.data.copy_(tensor_cpu.to(self.device) / self.config.num_nodes)
+            else:
+                dist.all_reduce(param.data, op=dist.ReduceOp.SUM)
+                param.data /= self.config.num_nodes
 
     def _broadcast_model_params(self) -> None:
         for param in self.model.parameters():
@@ -89,8 +96,8 @@ class DilocoSimulator(Evaluator, SpartaInterpolator):
 
         while self.local_step < self.max_local_step:
 
-            if self.config.p_sparta > 0.0:
-                self._interpolate_models()
+            #if self.config.p_sparta > 0.0:
+            #    self._interpolate_models()
 
             loss = self._train_step()
 
